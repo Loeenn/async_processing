@@ -1,0 +1,101 @@
+# Общая часть для всех python-сервисов: один образ, один .env
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  env_file:
+    - .env
+  environment: &app-env
+    DB__HOST: postgres
+    DB__PORT: 5432
+    RABBIT__HOST: rabbitmq
+    RABBIT__PORT: 5672
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${DB__USER}
+      POSTGRES_PASSWORD: ${DB__PASSWORD}
+      POSTGRES_DB: ${DB__NAME}
+    ports:
+      - "${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB__USER} -d ${DB__NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT__USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT__PASSWORD}
+    ports:
+      - "${RABBIT_HOST_PORT:-5672}:5672"
+      - "${RABBIT_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  migrations:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "cli.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  # Перекладывает события из таблицы outbox в RabbitMQ
+  outbox:
+    <<: *app
+    command: ["python", "-m", "cli.outbox"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "cli.consumer"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
